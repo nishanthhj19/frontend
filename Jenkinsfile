@@ -1,15 +1,28 @@
+
 pipeline {
     agent any
 
     environment {
-        IMAGE_NAME = "nishanthhj02/frontend:${GIT_COMMIT}"
+        DOCKER_IMAGE = "nishanthhj02/frontend"
     }
 
     stages {
 
         stage('Git Checkout') {
             steps {
-                git url: 'https://github.com/nishanthhj19/frontend.git', branch: 'main'
+                git url: 'https://github.com/nishanthhj19/frontend.git',
+                    branch: 'main'
+
+                script {
+                    env.GIT_COMMIT = sh(
+                        script: 'git rev-parse --short HEAD',
+                        returnStdout: true
+                    ).trim()
+
+                    env.IMAGE_NAME = "${env.DOCKER_IMAGE}:${env.GIT_COMMIT}"
+
+                    echo "Building image: ${env.IMAGE_NAME}"
+                }
             }
         }
 
@@ -22,8 +35,7 @@ pipeline {
         stage('Docker Build') {
             steps {
                 sh '''
-                    printenv
-                    docker build -t ${IMAGE_NAME} .
+                    docker build -t "$IMAGE_NAME" .
                 '''
             }
         }
@@ -35,16 +47,23 @@ pipeline {
                     usernameVariable: 'DOCKER_USERNAME',
                     passwordVariable: 'DOCKER_PASSWORD'
                 )]) {
-                    sh "echo $DOCKER_PASSWORD | docker login -u $DOCKER_USERNAME --password-stdin"
+                    sh '''
+                        echo "$DOCKER_PASSWORD" | docker login \
+                            -u "$DOCKER_USERNAME" \
+                            --password-stdin
+                    '''
                 }
             }
         }
 
         stage('Push to Docker Hub') {
             steps {
-                sh "docker push ${IMAGE_NAME}"
+                sh '''
+                    docker push "$IMAGE_NAME"
+                '''
             }
         }
+
         stage('Update GitOps Deployment') {
             steps {
                 withCredentials([usernamePassword(
@@ -52,23 +71,49 @@ pipeline {
                     usernameVariable: 'GIT_USERNAME',
                     passwordVariable: 'GIT_PASSWORD'
                 )]) {
+
                     sh '''
+                        set -e
+
+                        # Remove previous GitOps checkout
                         if [ -d "gitops" ]; then
-                            echo "gitops directory exists. Removing it..."
+                            echo "Removing existing GitOps directory..."
                             rm -rf gitops
                         fi
-                        git clone https://$GIT_USERNAME:$GIT_PASSWORD@github.com/nishanthhj19/GitOps.git gitops
+
+                        # Clone GitOps repository
+                        git clone \
+                            "https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/nishanthhj19/GitOps.git" \
+                            gitops
+
                         cd gitops/base/frontend/
 
+                        # Configure Git
                         git config user.email "jenkins@ci.com"
                         git config user.name "jenkins"
 
-                        # Update image tag
-                        sed -i "s|image: .*frontend.*|image: ${IMAGE_NAME}|g" deployment.yaml
+                        # Update frontend image
+                        echo "Updating frontend image to ${IMAGE_NAME}"
 
-                        git add .
+                        sed -i \
+                            "s|image: .*frontend.*|image: ${IMAGE_NAME}|g" \
+                            deployment.yaml
+
+                        # Check for changes
+                        if git diff --quiet; then
+                            echo "No changes detected."
+                            echo "Frontend image is already up to date."
+                            exit 0
+                        fi
+
+                        # Commit and push
+                        git add deployment.yaml
+
                         git commit -m "Update frontend image to ${IMAGE_NAME}"
+
                         git push origin main
+
+                        echo "GitOps deployment updated successfully."
                     '''
                 }
             }
@@ -77,12 +122,21 @@ pipeline {
 
     post {
         always {
-            sh "docker rmi ${IMAGE_NAME} || true"
-            sh "docker logout || true"
+            script {
+                if (env.IMAGE_NAME) {
+                    sh '''
+                        docker rmi "$IMAGE_NAME" || true
+                    '''
+                }
+            }
+
+            sh 'docker logout || true'
         }
+
         success {
-            echo "Build and push successful: ${IMAGE_NAME}"
+            echo "Build and push successful: ${env.IMAGE_NAME}"
         }
+
         failure {
             echo "Pipeline failed. Check the logs above."
         }
